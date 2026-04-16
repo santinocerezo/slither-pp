@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>NEON SLITHER — Enter the Arena</title>
+  <meta name="description" content="Neon Slither.io clone — compete against 9 AI opponents, grow your snake, and top the leaderboard.">
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body class="login-page">
+  <div class="bg-animation"></div>
+
+  <div class="login-container">
+
+    <!-- Logo -->
+    <div class="logo-area">
+      <h1 class="game-title">NEON SLITHER</h1>
+      <p class="game-subtitle">Hunt · Eat · Dominate</p>
+    </div>
+
+    <!-- Login card -->
+    <div class="login-card">
+      <div class="input-group">
+        <label for="nicknameInput">YOUR NICKNAME</label>
+        <input
+          type="text"
+          id="nicknameInput"
+          placeholder="e.g. ViperX"
+          maxlength="20"
+          autocomplete="off"
+          spellcheck="false"
+        >
+        <span class="input-hint" id="inputHint">&nbsp;</span>
+      </div>
+
+      <div id="recentPlayers" class="recent-players hidden">
+        <label>RECENT PLAYERS</label>
+        <div id="recentList"></div>
+      </div>
+
+      <button id="playBtn" class="btn-play" disabled>
+        <span class="btn-text">ENTER ARENA</span>
+      </button>
+    </div>
+
+    <!-- Global leaderboard -->
+    <div class="leaderboard-preview">
+      <h3>HALL OF FAME</h3>
+      <div id="leaderboardList">
+        <div class="loading">Loading scores...</div>
+      </div>
+    </div>
+
+  </div>
+
+  <!-- Player history modal -->
+  <div id="historyModal" class="modal hidden">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h2 id="historyTitle">WELCOME BACK</h2>
+        <button class="modal-close" id="closeHistory" aria-label="Close">✕</button>
+      </div>
+
+      <div id="playerStats" class="player-stats"></div>
+
+      <div id="gameHistory" class="game-history">
+        <h3>RECENT GAMES</h3>
+        <div id="historyRows"></div>
+      </div>
+
+      <button id="startGameBtn" class="btn-play btn-lg">START GAME</button>
+    </div>
+  </div>
+
+  <script src="/socket.io/socket.io.js"></script>
+  <script src="js/ui.js"></script>
+</body>
+</html>

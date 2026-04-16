@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+  <title>NEON SLITHER</title>
+  <link rel="stylesheet" href="css/style.css">
+  <style>
+    body   { margin: 0; overflow: hidden; background: #05050f; }
+    canvas { display: block; }
+  </style>
+</head>
+<body>
+  <canvas id="gameCanvas"></canvas>
+
+  <!-- Custom cursor dot -->
+  <div id="cursor" class="game-cursor"></div>
+
+  <!-- Start overlay -->
+  <div id="startOverlay" class="overlay">
+    <div class="start-panel">
+      <div id="playerName" class="player-name-display"></div>
+      <p class="start-hint">
+        Move your mouse to steer<br>
+        Hold click to boost &amp; sprint
+      </p>
+      <button id="startBtn" class="btn-play btn-lg">START SLITHERING</button>
+    </div>
+  </div>
+
+  <!-- Death overlay -->
+  <div id="deathOverlay" class="overlay hidden">
+    <div class="death-panel">
+      <h2 class="death-title">GAME OVER</h2>
+      <div id="deathStats" class="death-stats"></div>
+      <div class="death-buttons">
+        <button id="restartBtn" class="btn-play">PLAY AGAIN</button>
+        <button id="menuBtn"    class="btn-secondary">MAIN MENU</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="/socket.io/socket.io.js"></script>
+  <script src="js/game.js"></script>
+</body>
+</html>
