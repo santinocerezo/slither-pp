@@ -23,6 +23,8 @@ const BASE_SPEED   = 3.0;
 const BOOST_SPEED  = 5.5;
 const BOOST_DRAIN  = 0.4;  // segments lost per boost frame
 const TURN_SPEED   = 0.072; // radians per frame
+const GROWTH_RATE  = 0.4;   // growth per food size unit (lower = slower growth)
+const SELF_COLLIDE_IDX = 40; // player can't self-collide until segment 40
 
 const NEON_COLORS = [
   '#00ff88',  // player — neon green
@@ -236,29 +238,35 @@ class NeonGame {
     let dangerAngle= 0;
 
     const allSnakes = [this.player, ...this.bots];
+    let closestDangerD2 = Infinity;
+
     for (const other of allSnakes) {
       if (other === bot || !other.alive) continue;
-      for (let i = 0; i < Math.min(other.segs.length, 30); i++) {
+      // Check other snake's head (collision threat) and first 40 body segments
+      const checkLen = Math.min(other.segs.length, 40);
+      for (let i = 0; i < checkLen; i++) {
         const s  = other.segs[i];
         const d2 = dist2(head.x, head.y, s.x, s.y);
-        if (d2 < 120 * 120) {
+        if (d2 < 180 * 180 && d2 < closestDangerD2) {
+          closestDangerD2 = d2;
           danger      = true;
           dangerAngle = Math.atan2(s.y - head.y, s.x - head.x);
-          break;
         }
       }
-      if (danger) break;
     }
 
     if (danger) {
-      ai.state       = 'evade';
-      ai.spookTimer  = 60;
-      bot.angle      = lerpAngle(bot.angle, dangerAngle + Math.PI + randRange(-0.5, 0.5), 0.15 * delta);
+      ai.state      = 'evade';
+      ai.spookTimer = 45;
+      // Turn sharply away — stronger correction the closer the threat
+      const urgency = 1 - Math.sqrt(closestDangerD2) / 180;
+      const turn    = 0.18 + urgency * 0.15;
+      bot.angle     = lerpAngle(bot.angle, dangerAngle + Math.PI + randRange(-0.3, 0.3), turn * delta);
       return;
     }
 
-    // Find nearest food
-    if (!ai.targetFood || !this.food.includes(ai.targetFood) || ai.spookTimer <= 0) {
+    // Find nearest food, update target periodically
+    if (!ai.targetFood || !this.food.includes(ai.targetFood)) {
       let best = null, bestD = Infinity;
       for (const f of this.food) {
         const d2 = dist2(head.x, head.y, f.x, f.y);
@@ -267,22 +275,22 @@ class NeonGame {
       ai.targetFood = best;
     }
 
-    // Steer toward food or wander
+    // Steer toward food or wander — sharper turning than before
     if (ai.targetFood) {
       const tx = ai.targetFood.x, ty = ai.targetFood.y;
       const target = Math.atan2(ty - head.y, tx - head.x);
-      bot.angle = lerpAngle(bot.angle, target, 0.06 * delta);
+      bot.angle = lerpAngle(bot.angle, target, 0.10 * delta);
     } else {
       ai.wanderAngle += randRange(-0.04, 0.04) * delta;
-      bot.angle = lerpAngle(bot.angle, ai.wanderAngle, 0.05 * delta);
+      bot.angle = lerpAngle(bot.angle, ai.wanderAngle, 0.07 * delta);
     }
 
-    // Steer away from borders
-    const M = 200;
-    if      (head.x < M)           bot.angle = lerpAngle(bot.angle,  0.0,              0.2 * delta);
-    else if (head.x > WORLD_W - M) bot.angle = lerpAngle(bot.angle,  Math.PI,          0.2 * delta);
-    if      (head.y < M)           bot.angle = lerpAngle(bot.angle,  Math.PI * 0.5,    0.2 * delta);
-    else if (head.y > WORLD_H - M) bot.angle = lerpAngle(bot.angle, -Math.PI * 0.5,    0.2 * delta);
+    // Steer away from borders — wider margin, stronger correction
+    const M = 250;
+    if      (head.x < M)           bot.angle = lerpAngle(bot.angle,  0.0,           0.25 * delta);
+    else if (head.x > WORLD_W - M) bot.angle = lerpAngle(bot.angle,  Math.PI,       0.25 * delta);
+    if      (head.y < M)           bot.angle = lerpAngle(bot.angle,  Math.PI * 0.5, 0.25 * delta);
+    else if (head.y > WORLD_H - M) bot.angle = lerpAngle(bot.angle, -Math.PI * 0.5, 0.25 * delta);
   }
 
   _moveSnake(snake, speed) {
@@ -321,7 +329,7 @@ class NeonGame {
       for (let i = this.food.length - 1; i >= 0; i--) {
         const f  = this.food[i];
         if (dist2(h.x, h.y, f.x, f.y) < r2) {
-          const growth = Math.ceil(f.size * 1.5);
+          const growth = Math.ceil(f.size * GROWTH_RATE);
           snake.growing += growth;
           snake.score   += f.value;
           this.food.splice(i, 1);
@@ -346,10 +354,16 @@ class NeonGame {
       for (const other of allSnakes) {
         if (!other.alive) continue;
 
-        const startIdx = (other === snake) ? 12 : 0;
+        const isSelf = (other === snake);
+
+        // Player never dies from their own body — can loop freely
+        if (isSelf && !snake.isBot) continue;
+
+        // Bots skip first 12 segments vs self, player skips first SELF_COLLIDE_IDX
+        const startIdx = isSelf ? SELF_COLLIDE_IDX : 0;
 
         for (let i = startIdx; i < other.segs.length; i++) {
-          const s  = other.segs[i];
+          const s       = other.segs[i];
           const collide = SEG_RADIUS * 1.6;
           if (dist2(h.x, h.y, s.x, s.y) < collide * collide) {
             this._killSnake(snake, other);
@@ -382,7 +396,7 @@ class NeonGame {
     }
 
     // Big explosion
-    this._burst(snake.segs[0].x, snake.segs[0].y, snake.color, 50);
+    this._burst(snake.segs[0].x, snake.segs[0].y, snake.color, 22);
 
     if (killer) {
       killer.kills++;
@@ -408,10 +422,23 @@ class NeonGame {
 
   // ── Respawn dead bots ───────────────────────────────────────────────────────
   _respawnDead() {
+    const playerHead = this.player.alive && this.player.segs.length
+      ? this.player.segs[0] : null;
+
     for (let i = 0; i < this.bots.length; i++) {
       if (!this.bots[i].alive) {
-        const x   = randRange(300, WORLD_W - 300);
-        const y   = randRange(300, WORLD_H - 300);
+        // Keep trying spawn positions until we find one far from the player
+        let x, y, attempts = 0;
+        do {
+          x = randRange(300, WORLD_W - 300);
+          y = randRange(300, WORLD_H - 300);
+          attempts++;
+        } while (
+          playerHead &&
+          dist2(x, y, playerHead.x, playerHead.y) < 600 * 600 &&
+          attempts < 20
+        );
+
         const bot = this._createSnake(x, y, NEON_COLORS[(i % (NEON_COLORS.length - 1)) + 1], BOT_NAMES[i], true);
         bot.ai    = { state: 'wander', wanderAngle: Math.random() * Math.PI * 2, targetFood: null, spookTimer: 0 };
         this.bots[i] = bot;
@@ -663,24 +690,23 @@ class NeonGame {
     ctx.lineJoin = 'round';
 
     // ── Body ─────────────────────────────────────────────────────────────────
-    // Pass 1: outer glow halo
-    ctx.globalAlpha = 0.18;
-    ctx.lineWidth   = SEG_RADIUS * 2 + 10;
+    // Pass 1: soft outer halo (no shadowBlur — use wider stroke at low alpha instead)
+    ctx.globalAlpha = 0.15;
+    ctx.lineWidth   = SEG_RADIUS * 2 + 12;
     ctx.strokeStyle = snake.color;
     ctx.shadowBlur  = 0;
     this._strokePath(ctx, segs);
 
-    // Pass 2: main body
+    // Pass 2: main body — NO shadowBlur (huge perf win on long snakes)
     ctx.globalAlpha = 1.0;
     ctx.lineWidth   = SEG_RADIUS * 2;
     ctx.strokeStyle = snake.color;
-    ctx.shadowBlur  = 18;
-    ctx.shadowColor = snake.color;
+    ctx.shadowBlur  = 0;
     this._strokePath(ctx, segs);
 
     // Pass 3: bright highlight stripe
-    ctx.globalAlpha = 0.45;
-    ctx.lineWidth   = SEG_RADIUS * 0.55;
+    ctx.globalAlpha = 0.4;
+    ctx.lineWidth   = SEG_RADIUS * 0.5;
     ctx.strokeStyle = '#ffffff';
     ctx.shadowBlur  = 0;
     this._strokePath(ctx, segs);
@@ -749,33 +775,45 @@ class NeonGame {
   // Build a smooth quadratic path through segments,
   // breaking it when a wrap-around jump is detected
   _strokePath(ctx, segs) {
+    // Viewport bounds in world-space (with margin so glow doesn't clip)
+    const margin = SEG_RADIUS * 4;
+    const vx0 = this.cam.x - margin;
+    const vy0 = this.cam.y - margin;
+    const vx1 = this.cam.x + this.canvas.width  + margin;
+    const vy1 = this.cam.y + this.canvas.height + margin;
+
     ctx.beginPath();
-    ctx.moveTo(segs[0].x, segs[0].y);
-    let broken = false;
+    let inPath = false;
 
-    for (let i = 1; i < segs.length - 1; i++) {
-      const dx  = Math.abs(segs[i].x - segs[i - 1].x);
-      const dy  = Math.abs(segs[i].y - segs[i - 1].y);
+    for (let i = 0; i < segs.length - 1; i++) {
+      const sx = segs[i].x, sy = segs[i].y;
 
-      if (dx > 150 || dy > 150) {
-        // Jump detected — stroke current segment then start fresh
-        if (!broken) ctx.stroke();
+      // Skip segment if both this and next point are offscreen
+      const nx = segs[i + 1].x, ny = segs[i + 1].y;
+      const offscreen =
+        Math.max(sx, nx) < vx0 || Math.min(sx, nx) > vx1 ||
+        Math.max(sy, ny) < vy0 || Math.min(sy, ny) > vy1;
+
+      // Also break path on world-wrap jumps
+      const jump = Math.abs(sx - nx) > 150 || Math.abs(sy - ny) > 150;
+
+      if (offscreen || jump) {
+        if (inPath) { ctx.stroke(); inPath = false; }
         ctx.beginPath();
-        ctx.moveTo(segs[i].x, segs[i].y);
-        broken = true;
         continue;
       }
 
-      const mx = (segs[i].x + segs[i + 1].x) / 2;
-      const my = (segs[i].y + segs[i + 1].y) / 2;
-      ctx.quadraticCurveTo(segs[i].x, segs[i].y, mx, my);
-      broken = false;
+      if (!inPath) {
+        ctx.moveTo(sx, sy);
+        inPath = true;
+      }
+
+      const mx = (sx + nx) / 2;
+      const my = (sy + ny) / 2;
+      ctx.quadraticCurveTo(sx, sy, mx, my);
     }
 
-    if (segs.length > 1) {
-      ctx.lineTo(segs[segs.length - 1].x, segs[segs.length - 1].y);
-    }
-    ctx.stroke();
+    if (inPath) ctx.stroke();
   }
 
   _drawPopups(ctx) {
