@@ -2,12 +2,12 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no, maximum-scale=1.0, minimum-scale=1.0">
   <title>NEON SLITHER</title>
   <link rel="stylesheet" href="css/style.css">
   <style>
-    body   { margin: 0; overflow: hidden; background: #05050f; }
-    canvas { display: block; }
+    body   { margin: 0; overflow: hidden; background: #05050f; touch-action: none; }
+    canvas { display: block; touch-action: none; }
   </style>
 </head>
 <body>
@@ -15,6 +15,14 @@
 
   <!-- Custom cursor dot -->
   <div id="cursor" class="game-cursor"></div>
+
+  <!-- Mobile joystick (shown only on touch devices) -->
+  <div id="joystick-zone" class="joystick-zone hidden">
+    <div id="joystick-base" class="joystick-base">
+      <div id="joystick-knob" class="joystick-knob"></div>
+    </div>
+    <div id="boost-btn" class="boost-btn">BOOST</div>
+  </div>
 
   <!-- Start overlay -->
   <div id="startOverlay" class="overlay">

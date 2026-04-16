@@ -1036,4 +1036,80 @@ function _roundRect(ctx, x, y, w, h, r) {
     cursor.style.left = e.clientX + 'px';
     cursor.style.top  = e.clientY + 'px';
   });
+
+  // ── Mobile joystick ────────────────────────────────────────────────────────
+  if ('ontouchstart' in window || navigator.maxTouchPoints > 0) {
+    cursor.style.display = 'none'; // hide mouse cursor on touch devices
+
+    const joystickZone = document.getElementById('joystick-zone');
+    const joystickBase = document.getElementById('joystick-base');
+    const joystickKnob = document.getElementById('joystick-knob');
+    const boostBtn     = document.getElementById('boost-btn');
+
+    joystickZone.classList.remove('hidden');
+
+    const BASE_R = 55; // joystick base radius
+    let joyActive = false;
+    let joyId     = null;
+
+    joystickBase.addEventListener('touchstart', e => {
+      e.preventDefault();
+      const t  = e.changedTouches[0];
+      joyId     = t.identifier;
+      joyActive = true;
+    }, { passive: false });
+
+    joystickBase.addEventListener('touchmove', e => {
+      e.preventDefault();
+      if (!joyActive || !game) return;
+
+      let touch = null;
+      for (const t of e.changedTouches) {
+        if (t.identifier === joyId) { touch = t; break; }
+      }
+      if (!touch) return;
+
+      const rect = joystickBase.getBoundingClientRect();
+      const cx   = rect.left + rect.width  / 2;
+      const cy   = rect.top  + rect.height / 2;
+      const dx   = touch.clientX - cx;
+      const dy   = touch.clientY - cy;
+      const dist = Math.sqrt(dx * dx + dy * dy);
+      const clamped = Math.min(dist, BASE_R);
+      const angle   = Math.atan2(dy, dx);
+
+      // Move knob visually
+      joystickKnob.style.transform =
+        `translate(calc(-50% + ${Math.cos(angle) * clamped}px), calc(-50% + ${Math.sin(angle) * clamped}px))`;
+
+      // Steer snake by setting mouse position toward the angle
+      if (dist > 8 && game.running) {
+        const W = canvas.width  / 2;
+        const H = canvas.height / 2;
+        game.mouse.x = W + Math.cos(angle) * 200;
+        game.mouse.y = H + Math.sin(angle) * 200;
+      }
+    }, { passive: false });
+
+    joystickBase.addEventListener('touchend', e => {
+      for (const t of e.changedTouches) {
+        if (t.identifier === joyId) {
+          joyActive = false;
+          joystickKnob.style.transform = 'translate(-50%, -50%)';
+          break;
+        }
+      }
+    });
+
+    boostBtn.addEventListener('touchstart', e => {
+      e.preventDefault();
+      if (game) game.boost = true;
+      boostBtn.classList.add('active');
+    }, { passive: false });
+
+    boostBtn.addEventListener('touchend', () => {
+      if (game) game.boost = false;
+      boostBtn.classList.remove('active');
+    });
+  }
 })();
