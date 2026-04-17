@@ -13,7 +13,8 @@ const inputHint      = document.getElementById('inputHint');
 const playBtn        = document.getElementById('playBtn');
 const recentSection  = document.getElementById('recentPlayers');
 const recentList     = document.getElementById('recentList');
-const leaderboardEl  = document.getElementById('leaderboardList');
+const scoresBody     = document.getElementById('scoresBody');
+const scoresCount    = document.getElementById('scoresCount');
 const historyModal   = document.getElementById('historyModal');
 const historyTitle   = document.getElementById('historyTitle');
 const playerStatsEl  = document.getElementById('playerStats');
@@ -23,36 +24,49 @@ const startGameBtn   = document.getElementById('startGameBtn');
 
 let pendingNickname = '';
 
-// ── Socket.io leaderboard ─────────────────────────────────────────────────────
-const socket = io();
+// ── All scores table ──────────────────────────────────────────────────────────
+function loadAllScores() {
+  fetch('/api/scores/all')
+    .then(r => r.json())
+    .then(rows => renderScoresTable(rows))
+    .catch(() => {
+      scoresBody.innerHTML = '<tr><td colspan="6" class="loading">Could not load scores.</td></tr>';
+    });
+}
 
-socket.on('leaderboard_update', rows => renderLeaderboard(rows));
-
-// Also fetch on load (in case socket connects after render)
-fetch('/api/leaderboard')
-  .then(r => r.json())
-  .then(rows => renderLeaderboard(rows))
-  .catch(() => {
-    leaderboardEl.innerHTML = '<div class="loading">Could not load scores.</div>';
-  });
-
-function renderLeaderboard(rows) {
+function renderScoresTable(rows) {
   if (!rows || !rows.length) {
-    leaderboardEl.innerHTML = '<div class="loading">No scores yet — be the first!</div>';
+    scoresBody.innerHTML = '<tr><td colspan="6" class="loading">No scores yet — be the first!</td></tr>';
+    scoresCount.textContent = '';
     return;
   }
 
-  const medals = ['gold', 'silver', 'bronze'];
+  scoresCount.textContent = `${rows.length} games`;
 
-  leaderboardEl.innerHTML = rows.map((r, i) => `
-    <div class="lb-row">
-      <span class="lb-rank ${medals[i] || ''}">${i + 1}</span>
-      <span class="lb-name">${escHtml(r.nickname)}</span>
-      <span class="lb-kills">${r.kills ?? 0} kills</span>
-      <span class="lb-score">${r.score.toLocaleString()}</span>
-    </div>
-  `).join('');
+  const medals = ['🥇', '🥈', '🥉'];
+
+  scoresBody.innerHTML = rows.map((r, i) => {
+    const d = new Date(r.played_at);
+    const dateStr = `${d.getDate().toString().padStart(2,'0')}/${(d.getMonth()+1).toString().padStart(2,'0')} ${d.getHours().toString().padStart(2,'0')}:${d.getMinutes().toString().padStart(2,'0')}`;
+    const rankClass = i < 3 ? ['gold','silver','bronze'][i] : '';
+    return `
+      <tr class="${rankClass ? 'row-' + rankClass : ''}">
+        <td class="col-rank ${rankClass}">${medals[i] ?? i + 1}</td>
+        <td class="col-name">${escHtml(r.nickname)}</td>
+        <td class="col-score">${Number(r.score).toLocaleString()}</td>
+        <td class="col-len">${r.length ?? 0}</td>
+        <td class="col-kills">${r.kills ?? 0}</td>
+        <td class="col-date">${dateStr}</td>
+      </tr>
+    `;
+  }).join('');
 }
+
+// Socket.io: refresh table when a new score is saved
+const socket = io();
+socket.on('leaderboard_update', () => loadAllScores());
+
+loadAllScores();
 
 // ── Recent players ─────────────────────────────────────────────────────────────
 function getRecent() {

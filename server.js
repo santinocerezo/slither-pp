@@ -86,6 +86,17 @@ app.get('/api/leaderboard', async (_req, res) => {
   }
 });
 
+// GET /api/scores/all — all game sessions ordered by score desc
+app.get('/api/scores/all', async (_req, res) => {
+  try {
+    const rows = await db.getAllScores();
+    res.json(rows);
+  } catch (err) {
+    console.error('[API] GET /scores/all:', err.message);
+    res.status(500).json({ error: 'Internal server error.' });
+  }
+});
+
 // ── Socket.io ─────────────────────────────────────────────────────────────────
 io.on('connection', async socket => {
   try {

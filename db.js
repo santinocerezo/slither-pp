@@ -143,18 +143,39 @@ async function getLeaderboard() {
   }
 
   const { rows } = await pool.query(`
-    SELECT DISTINCT ON (gs.player_id)
-      p.nickname,
-      gs.score,
-      gs.kills,
-      gs.played_at
+    SELECT p.nickname, gs.score, gs.kills, gs.played_at
     FROM game_sessions gs
     JOIN players p ON p.id = gs.player_id
-    ORDER BY gs.player_id, gs.score DESC, gs.played_at DESC
+    WHERE gs.score = (
+      SELECT MAX(gs2.score) FROM game_sessions gs2 WHERE gs2.player_id = gs.player_id
+    )
+    ORDER BY gs.score DESC
     LIMIT 10
   `);
 
-  return rows.sort((a, b) => b.score - a.score);
+  return rows;
 }
 
-module.exports = { init, getOrCreatePlayer, getPlayerHistory, getPlayerStats, saveScore, getLeaderboard };
+async function getAllScores() {
+  if (useMemory) {
+    return memSessions
+      .map(s => {
+        const p = [...memPlayers.values()].find(x => x.id === s.player_id);
+        if (!p) return null;
+        return { nickname: p.nickname, score: s.score, length: s.length, kills: s.kills, duration: s.duration, played_at: s.played_at };
+      })
+      .filter(Boolean)
+      .sort((a, b) => b.score - a.score);
+  }
+
+  const { rows } = await pool.query(`
+    SELECT p.nickname, gs.score, gs.length, gs.kills, gs.duration, gs.played_at
+    FROM game_sessions gs
+    JOIN players p ON p.id = gs.player_id
+    ORDER BY gs.score DESC
+  `);
+
+  return rows;
+}
+
+module.exports = { init, getOrCreatePlayer, getPlayerHistory, getPlayerStats, saveScore, getLeaderboard, getAllScores };

@@ -43,11 +43,28 @@
       </button>
     </div>
 
-    <!-- Global leaderboard -->
+    <!-- Global scores table -->
     <div class="leaderboard-preview">
-      <h3>HALL OF FAME</h3>
-      <div id="leaderboardList">
-        <div class="loading">Loading scores...</div>
+      <div class="scores-header">
+        <h3>ALL SCORES</h3>
+        <span id="scoresCount" class="scores-count"></span>
+      </div>
+      <div class="scores-table-wrap">
+        <table class="scores-table">
+          <thead>
+            <tr>
+              <th>#</th>
+              <th>PLAYER</th>
+              <th>SCORE</th>
+              <th>LENGTH</th>
+              <th>KILLS</th>
+              <th>DATE</th>
+            </tr>
+          </thead>
+          <tbody id="scoresBody">
+            <tr><td colspan="6" class="loading">Loading scores...</td></tr>
+          </tbody>
+        </table>
       </div>
     </div>
 
