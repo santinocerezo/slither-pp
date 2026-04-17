@@ -143,12 +143,13 @@ class NeonGame {
     return {
       segs, color, name, isBot,
       angle,
-      speed:   BASE_SPEED,
-      growing: 0,
-      alive:   true,
-      score:   0,
-      kills:   0,
-      ai:      null
+      speed:    BASE_SPEED,
+      growing:  0,
+      boosting: false,
+      alive:    true,
+      score:    0,
+      kills:    0,
+      ai:       null
     };
   }
 
@@ -221,7 +222,9 @@ class NeonGame {
     for (const bot of this.bots) {
       if (!bot.alive) continue;
       this._runBotAI(bot, delta);
-      this._moveSnake(bot, BASE_SPEED * delta);
+      const botSpeed = bot.boosting ? BOOST_SPEED : BASE_SPEED;
+      if (bot.boosting) bot.growing = Math.max((bot.growing || 0) - BOOST_DRAIN * delta, 0);
+      this._moveSnake(bot, botSpeed * delta);
       this._borderKill(bot);
     }
   }
@@ -230,24 +233,26 @@ class NeonGame {
     const head = bot.segs[0];
     const ai   = bot.ai;
 
-    // Decrement spook timer
     if (ai.spookTimer > 0) ai.spookTimer -= delta;
 
-    // Detect danger (nearby snake heads)
-    let danger     = false;
-    let dangerAngle= 0;
-
-    const allSnakes = [this.player, ...this.bots];
+    // ── Danger scan: other snakes + own body ──────────────────────────────────
+    let danger          = false;
+    let dangerAngle     = 0;
     let closestDangerD2 = Infinity;
 
+    const allSnakes = [this.player, ...this.bots];
+
     for (const other of allSnakes) {
-      if (other === bot || !other.alive) continue;
-      // Check other snake's head (collision threat) and first 40 body segments
-      const checkLen = Math.min(other.segs.length, 40);
-      for (let i = 0; i < checkLen; i++) {
+      if (!other.alive) continue;
+      const isSelf  = other === bot;
+      const startI  = isSelf ? 20 : 0;   // skip own neck segments
+      const checkLen = Math.min(other.segs.length, isSelf ? 60 : 50);
+      const radius   = isSelf ? 120 : 200;
+
+      for (let i = startI; i < checkLen; i++) {
         const s  = other.segs[i];
         const d2 = dist2(head.x, head.y, s.x, s.y);
-        if (d2 < 180 * 180 && d2 < closestDangerD2) {
+        if (d2 < radius * radius && d2 < closestDangerD2) {
           closestDangerD2 = d2;
           danger      = true;
           dangerAngle = Math.atan2(s.y - head.y, s.x - head.x);
@@ -255,42 +260,53 @@ class NeonGame {
       }
     }
 
+    // ── Border danger ─────────────────────────────────────────────────────────
+    const M = 300;
+    const borderDanger =
+      head.x < M || head.x > WORLD_W - M ||
+      head.y < M || head.y > WORLD_H - M;
+
     if (danger) {
       ai.state      = 'evade';
-      ai.spookTimer = 45;
-      // Turn sharply away — stronger correction the closer the threat
-      const urgency = 1 - Math.sqrt(closestDangerD2) / 180;
-      const turn    = 0.18 + urgency * 0.15;
-      bot.angle     = lerpAngle(bot.angle, dangerAngle + Math.PI + randRange(-0.3, 0.3), turn * delta);
+      ai.spookTimer = 50;
+      const urgency = 1 - Math.sqrt(closestDangerD2) / 200;
+      const turn    = 0.20 + urgency * 0.20;
+      bot.angle     = lerpAngle(bot.angle, dangerAngle + Math.PI + randRange(-0.25, 0.25), turn * delta);
+      bot.boosting  = false;
       return;
     }
 
-    // Find nearest food, update target periodically
-    if (!ai.targetFood || !this.food.includes(ai.targetFood)) {
-      let best = null, bestD = Infinity;
+    // Border avoidance
+    if      (head.x < M)           bot.angle = lerpAngle(bot.angle,  0.0,           0.30 * delta);
+    else if (head.x > WORLD_W - M) bot.angle = lerpAngle(bot.angle,  Math.PI,       0.30 * delta);
+    if      (head.y < M)           bot.angle = lerpAngle(bot.angle,  Math.PI * 0.5, 0.30 * delta);
+    else if (head.y > WORLD_H - M) bot.angle = lerpAngle(bot.angle, -Math.PI * 0.5, 0.30 * delta);
+
+    if (borderDanger) { bot.boosting = false; return; }
+
+    // ── Find best food: weighted by size/distance ─────────────────────────────
+    if (!ai.targetFood || !this.food.includes(ai.targetFood) || Math.random() < 0.01) {
+      let best = null, bestScore = -Infinity;
       for (const f of this.food) {
         const d2 = dist2(head.x, head.y, f.x, f.y);
-        if (d2 < bestD) { bestD = d2; best = f; }
+        const score = f.value / (Math.sqrt(d2) + 1);
+        if (score > bestScore) { bestScore = score; best = f; }
       }
       ai.targetFood = best;
     }
 
-    // Steer toward food or wander — sharper turning than before
     if (ai.targetFood) {
       const tx = ai.targetFood.x, ty = ai.targetFood.y;
       const target = Math.atan2(ty - head.y, tx - head.x);
-      bot.angle = lerpAngle(bot.angle, target, 0.10 * delta);
+      const d2     = dist2(head.x, head.y, tx, ty);
+      bot.angle    = lerpAngle(bot.angle, target, 0.13 * delta);
+      // Boost toward food when close and snake is large enough
+      bot.boosting = d2 < 200 * 200 && bot.segs.length > 40 && !danger;
     } else {
       ai.wanderAngle += randRange(-0.04, 0.04) * delta;
-      bot.angle = lerpAngle(bot.angle, ai.wanderAngle, 0.07 * delta);
+      bot.angle    = lerpAngle(bot.angle, ai.wanderAngle, 0.08 * delta);
+      bot.boosting = false;
     }
-
-    // Steer away from borders — wider margin, stronger correction
-    const M = 250;
-    if      (head.x < M)           bot.angle = lerpAngle(bot.angle,  0.0,           0.25 * delta);
-    else if (head.x > WORLD_W - M) bot.angle = lerpAngle(bot.angle,  Math.PI,       0.25 * delta);
-    if      (head.y < M)           bot.angle = lerpAngle(bot.angle,  Math.PI * 0.5, 0.25 * delta);
-    else if (head.y > WORLD_H - M) bot.angle = lerpAngle(bot.angle, -Math.PI * 0.5, 0.25 * delta);
   }
 
   _moveSnake(snake, speed) {
@@ -356,11 +372,10 @@ class NeonGame {
 
         const isSelf = (other === snake);
 
-        // Player never dies from their own body — can loop freely
-        if (isSelf && !snake.isBot) continue;
+        // Neither player nor bots die from their own body
+        if (isSelf) continue;
 
-        // Bots skip first 12 segments vs self, player skips first SELF_COLLIDE_IDX
-        const startIdx = isSelf ? SELF_COLLIDE_IDX : 0;
+        const startIdx = 0;
 
         for (let i = startIdx; i < other.segs.length; i++) {
           const s       = other.segs[i];
@@ -1085,8 +1100,9 @@ function _roundRect(ctx, x, y, w, h, r) {
     const boostBtn     = document.getElementById('boost-btn');
 
     joystickZone.classList.remove('hidden');
+    boostBtn.classList.remove('hidden');
 
-    const BASE_R = 55; // joystick base radius
+    const BASE_R = 65; // joystick base radius
     let joyActive = false;
     let joyId     = null;
 
