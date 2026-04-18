@@ -4,34 +4,64 @@ const express  = require('express');
 const http     = require('http');
 const { Server } = require('socket.io');
 const cors     = require('cors');
+const helmet   = require('helmet');
+const rateLimit = require('express-rate-limit');
 const path     = require('path');
 const db       = require('./db');
 
 const app    = express();
 const server = http.createServer(app);
-const io     = new Server(server, {
-  cors: { origin: '*', methods: ['GET', 'POST'] }
-});
 
-app.use(cors());
-app.use(express.json());
+const allowedOrigins = (process.env.ALLOWED_ORIGINS || '').split(',').map(o => o.trim()).filter(Boolean);
+const corsOptions = allowedOrigins.length
+  ? {
+      origin: (origin, cb) => {
+        if (!origin || allowedOrigins.includes(origin)) return cb(null, true);
+        return cb(new Error('CORS: origin not allowed'));
+      },
+    }
+  : {}; // dev: permitir same-origin
+
+const io = new Server(server, { cors: corsOptions });
+
+const NICKNAME_REGEX = /^[a-zA-Z0-9_\- ]{2,20}$/;
+const MAX_SCORE    = 1_000_000;
+const MAX_LENGTH   = 100_000;
+const MAX_KILLS    = 10_000;
+const MAX_DURATION = 2 * 60 * 60; // 2h en segundos
+
+app.set('trust proxy', 1); // Railway proxies
+app.use(helmet());
+app.use(cors(corsOptions));
+app.use(express.json({ limit: '10kb' }));
 app.use(express.static(path.join(__dirname, 'public')));
 
-// ── Init DB ───────────────────────────────────────────────────────────────────
+const apiLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 60,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many requests, slow down.' },
+});
+const writeLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 30,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many score submissions.' },
+});
+app.use('/api/', apiLimiter);
+
 db.init().catch(err => {
   console.error('[DB] Init error:', err.message);
   console.log('[DB] Falling back to in-memory storage.');
 });
 
-// ── API ───────────────────────────────────────────────────────────────────────
-
-// GET /api/player/:nickname — register or retrieve player + history
+// GET /api/player/:nickname
 app.get('/api/player/:nickname', async (req, res) => {
-  const { nickname } = req.params;
-  const clean = (nickname || '').trim();
-
-  if (!clean || clean.length < 2 || clean.length > 20) {
-    return res.status(400).json({ error: 'Nickname must be 2-20 characters.' });
+  const clean = (req.params.nickname || '').trim();
+  if (!NICKNAME_REGEX.test(clean)) {
+    return res.status(400).json({ error: 'Nickname must be 2-20 chars (letters, numbers, _ - space).' });
   }
 
   try {
@@ -45,26 +75,26 @@ app.get('/api/player/:nickname', async (req, res) => {
   }
 });
 
-// POST /api/score — save a game result
-app.post('/api/score', async (req, res) => {
-  const { nickname, score, length, kills, duration } = req.body;
-  const clean = (nickname || '').trim();
+// POST /api/score
+app.post('/api/score', writeLimiter, async (req, res) => {
+  const { nickname, score, length, kills, duration } = req.body || {};
+  const clean = typeof nickname === 'string' ? nickname.trim() : '';
 
-  if (!clean || score === undefined || score === null) {
-    return res.status(400).json({ error: 'nickname and score are required.' });
+  if (!NICKNAME_REGEX.test(clean)) {
+    return res.status(400).json({ error: 'Invalid nickname.' });
   }
+
+  const s = Math.max(0, Math.min(MAX_SCORE,    parseInt(score)    || 0));
+  const l = Math.max(0, Math.min(MAX_LENGTH,   parseInt(length)   || 0));
+  const k = Math.max(0, Math.min(MAX_KILLS,    parseInt(kills)    || 0));
+  const d = Math.max(0, Math.min(MAX_DURATION, parseInt(duration) || 0));
 
   try {
     const player  = await db.getOrCreatePlayer(clean);
     const session = await db.saveScore({
-      playerId: player.id,
-      score:    Math.max(0, parseInt(score)    || 0),
-      length:   Math.max(0, parseInt(length)   || 0),
-      kills:    Math.max(0, parseInt(kills)    || 0),
-      duration: Math.max(0, parseInt(duration) || 0)
+      playerId: player.id, score: s, length: l, kills: k, duration: d,
     });
 
-    // Push updated leaderboard to all connected clients
     const leaderboard = await db.getLeaderboard();
     io.emit('leaderboard_update', leaderboard);
 
@@ -75,39 +105,30 @@ app.post('/api/score', async (req, res) => {
   }
 });
 
-// GET /api/leaderboard
 app.get('/api/leaderboard', async (_req, res) => {
-  try {
-    const rows = await db.getLeaderboard();
-    res.json(rows);
-  } catch (err) {
+  try { res.json(await db.getLeaderboard()); }
+  catch (err) {
     console.error('[API] GET /leaderboard:', err.message);
     res.status(500).json({ error: 'Internal server error.' });
   }
 });
 
-// GET /api/scores/all — all game sessions ordered by score desc
 app.get('/api/scores/all', async (_req, res) => {
-  try {
-    const rows = await db.getAllScores();
-    res.json(rows);
-  } catch (err) {
+  try { res.json(await db.getAllScores()); }
+  catch (err) {
     console.error('[API] GET /scores/all:', err.message);
     res.status(500).json({ error: 'Internal server error.' });
   }
 });
 
-// ── Socket.io ─────────────────────────────────────────────────────────────────
 io.on('connection', async socket => {
   try {
     const lb = await db.getLeaderboard();
     socket.emit('leaderboard_update', lb);
   } catch (_) {}
-
   socket.on('disconnect', () => {});
 });
 
-// ── Start ─────────────────────────────────────────────────────────────────────
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
   console.log(`🐍  NEON SLITHER  →  http://localhost:${PORT}`);
