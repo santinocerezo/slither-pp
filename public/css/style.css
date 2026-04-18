@@ -585,64 +585,69 @@ html, body {
    ═══════════════════════════════════════════════════════════════════════════ */
 .joystick-zone {
   position: fixed;
-  bottom: 60px;
-  left: 24px;
+  top: 0;
+  left: 0;
   z-index: 30;
   pointer-events: none;
+  transition: opacity 0.15s;
 }
 
 .joystick-base {
-  width: 130px;
-  height: 130px;
+  width: 160px;
+  height: 160px;
   border-radius: 50%;
-  background: rgba(0, 212, 255, 0.08);
-  border: 2px solid rgba(0, 212, 255, 0.3);
+  background: rgba(0, 212, 255, 0.09);
+  border: 2px solid rgba(0, 212, 255, 0.32);
   position: relative;
-  pointer-events: all;
+  pointer-events: none;
   touch-action: none;
-  box-shadow: 0 0 20px rgba(0, 212, 255, 0.1);
+  box-shadow: 0 0 22px rgba(0, 212, 255, 0.12);
 }
 
 .joystick-knob {
-  width: 52px;
-  height: 52px;
+  width: 64px;
+  height: 64px;
   border-radius: 50%;
-  background: rgba(0, 212, 255, 0.5);
+  background: rgba(0, 212, 255, 0.55);
   border: 2px solid var(--neon-cyan);
   position: absolute;
   top: 50%;
   left: 50%;
   transform: translate(-50%, -50%);
-  box-shadow: 0 0 12px var(--neon-cyan);
+  box-shadow: 0 0 14px var(--neon-cyan);
   pointer-events: none;
-  transition: background 0.1s;
+  transition: none;
 }
 
 .boost-btn {
   position: fixed;
-  bottom: 60px;
-  right: 24px;
-  width: 90px;
-  height: 90px;
+  bottom: 48px;
+  left: 28px;
+  width: 108px;
+  height: 108px;
   border-radius: 50%;
-  background: rgba(0, 255, 136, 0.1);
-  border: 2px solid rgba(0, 255, 136, 0.4);
+  background: rgba(0, 255, 136, 0.12);
+  border: 2px solid rgba(0, 255, 136, 0.45);
   display: flex;
   align-items: center;
   justify-content: center;
   font-family: 'Orbitron', monospace;
-  font-size: 0.6rem;
+  font-size: 0.68rem;
+  font-weight: 700;
   letter-spacing: 2px;
   color: var(--neon-green);
   pointer-events: all;
   touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
   -webkit-tap-highlight-color: transparent;
-  box-shadow: 0 0 14px rgba(0, 255, 136, 0.1);
-  transition: background 0.1s, box-shadow 0.1s;
+  box-shadow: 0 0 16px rgba(0, 255, 136, 0.15);
+  transition: background 0.08s, box-shadow 0.08s, transform 0.08s;
   z-index: 30;
 }
 
 .boost-btn.active {
-  background: rgba(0, 255, 136, 0.3);
-  box-shadow: 0 0 25px rgba(0, 255, 136, 0.5);
+  background: rgba(0, 255, 136, 0.35);
+  box-shadow: 0 0 30px rgba(0, 255, 136, 0.6);
+  transform: scale(0.94);
 }

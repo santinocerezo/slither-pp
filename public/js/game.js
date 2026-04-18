@@ -15,16 +15,23 @@
 const WORLD_W      = 5000;
 const WORLD_H      = 5000;
 const GRID_SIZE    = 50;
-const FOOD_TARGET  = 500;
+const FOOD_TARGET  = 520;
 const BOT_COUNT    = 9;
 const SEG_RADIUS   = 10;   // pixels, half-width of snake body
 const SEG_SPACING  = 4;    // distance between stored segments
 const BASE_SPEED   = 3.0;
 const BOOST_SPEED  = 5.5;
 const BOOST_DRAIN  = 0.4;  // segments lost per boost frame
-const TURN_SPEED   = 0.072; // radians per frame
+const TURN_SPEED   = 0.082; // radians per frame (slightly sharper controls)
 const GROWTH_RATE  = 0.4;   // growth per food size unit (lower = slower growth)
 const SELF_COLLIDE_IDX = 40; // player can't self-collide until segment 40
+
+// ── Bot AI tunables ──────────────────────────────────────────────────────────
+const BOT_VIEW_RADIUS   = 520;   // how far bots can "see"
+const BOT_DANGER_RADIUS = 240;   // immediate threat distance
+const BOT_HUNT_RADIUS   = 420;   // distance to start hunting
+const BOT_MIN_HUNT_LEN  = 85;    // min length before bot will attempt a cut
+const BOT_FORESEE_STEPS = 20;    // look-ahead steps for collision prediction
 
 const NEON_COLORS = [
   '#00ff88',  // player — neon green
@@ -44,6 +51,21 @@ const BOT_NAMES = [
   'ByteSerpent', 'NullCoil', 'VoidSlither', 'HexWorm', 'NeonSlash'
 ];
 
+// Personality archetypes — each bot picks one. Controls how it balances
+// aggression, caution, food greed, and boost usage.
+const BOT_PERSONALITIES = [
+  // aggressive hunter — big view, cuts off enemies, boosts often
+  { name: 'hunter',      aggression: 0.85, caution: 0.55, greed: 0.50, boostLove: 0.75, turn: 0.095 },
+  // opportunist — eats corpses, picks fights when ahead
+  { name: 'opportunist', aggression: 0.60, caution: 0.70, greed: 0.80, boostLove: 0.55, turn: 0.090 },
+  // coward — feeds and flees, very hard to catch
+  { name: 'coward',      aggression: 0.15, caution: 0.95, greed: 0.70, boostLove: 0.35, turn: 0.100 },
+  // pro — balanced, reads situations, punishes mistakes
+  { name: 'pro',         aggression: 0.70, caution: 0.80, greed: 0.60, boostLove: 0.60, turn: 0.098 },
+  // greedy — obsessed with food, reckless around corpses
+  { name: 'greedy',      aggression: 0.40, caution: 0.65, greed: 0.95, boostLove: 0.50, turn: 0.088 },
+];
+
 // ── Utils ─────────────────────────────────────────────────────────────────────
 function lerpAngle(a, b, t) {
   let d = b - a;
@@ -58,6 +80,16 @@ function dist2(ax, ay, bx, by) {
 }
 
 function randRange(min, max) { return min + Math.random() * (max - min); }
+
+function clamp(v, lo, hi) { return v < lo ? lo : v > hi ? hi : v; }
+
+// Shortest signed angular difference from a to b (result in (-pi, pi])
+function angleDiff(a, b) {
+  let d = b - a;
+  while (d >  Math.PI) d -= Math.PI * 2;
+  while (d < -Math.PI) d += Math.PI * 2;
+  return d;
+}
 
 function hexToRgba(hex, alpha) {
   const r = parseInt(hex.slice(1,3),16);
@@ -110,12 +142,12 @@ class NeonGame {
     const cy = WORLD_H / 2 + randRange(-300, 300);
     this.player = this._createSnake(cx, cy, NEON_COLORS[0], this.nickname, false);
 
-    // Create bots
+    // Create bots with randomised personalities
     for (let i = 0; i < BOT_COUNT; i++) {
       const x   = randRange(300, WORLD_W - 300);
       const y   = randRange(300, WORLD_H - 300);
       const bot = this._createSnake(x, y, NEON_COLORS[i + 1], BOT_NAMES[i], true);
-      bot.ai    = { state: 'wander', wanderAngle: Math.random() * Math.PI * 2, targetFood: null, spookTimer: 0 };
+      bot.ai    = this._newAI();
       this.bots.push(bot);
     }
 
@@ -150,6 +182,22 @@ class NeonGame {
       score:    0,
       kills:    0,
       ai:       null
+    };
+  }
+
+  _newAI() {
+    const p = BOT_PERSONALITIES[Math.floor(Math.random() * BOT_PERSONALITIES.length)];
+    return {
+      personality: p,
+      state:       'wander',              // wander | seek | evade | hunt | flee
+      wanderAngle: Math.random() * Math.PI * 2,
+      targetFood:  null,
+      huntTarget:  null,
+      huntTimer:   0,
+      reactTimer:  randRange(0, 6),       // reaction latency noise
+      decisionT:   0,                     // throttles expensive decisions
+      lastTurn:    0,
+      boostTimer:  0,
     };
   }
 
@@ -229,84 +277,272 @@ class NeonGame {
     }
   }
 
+  // ── Smarter bot AI ──────────────────────────────────────────────────────────
+  // Strategy layers (first that applies wins):
+  //   1. Predictive self-preservation  — look-ahead sampling of candidate
+  //      headings, pick the one with longest clear path (avoids walls,
+  //      other snakes, own body).
+  //   2. Hunt / cut-off                — if bigger than a nearby target,
+  //      aim at a lead point in front of them to force a collision.
+  //   3. Food seeking                  — weighted by size/distance and by
+  //      whether the bot is cornered by other snakes.
+  //   4. Wander                        — smoothed random drift.
   _runBotAI(bot, delta) {
     const head = bot.segs[0];
     const ai   = bot.ai;
+    const p    = ai.personality;
 
-    if (ai.spookTimer > 0) ai.spookTimer -= delta;
-
-    // ── Danger scan: other snakes + own body ──────────────────────────────────
-    let danger          = false;
-    let dangerAngle     = 0;
-    let closestDangerD2 = Infinity;
+    ai.decisionT -= delta;
+    ai.reactTimer = Math.max(0, ai.reactTimer - delta);
+    if (ai.huntTimer > 0) ai.huntTimer -= delta;
+    if (ai.boostTimer > 0) ai.boostTimer -= delta;
 
     const allSnakes = [this.player, ...this.bots];
 
+    // ── 1. Threat scan ────────────────────────────────────────────────────────
+    // Find nearest threatening segment. "Threatening" = another snake's body
+    // within view, or a wall. Record direction and distance for each.
+    let nearestThreatD2 = Infinity;
+    let nearestThreatA  = 0;   // world angle from head to the threat
+    const viewR2 = BOT_VIEW_RADIUS * BOT_VIEW_RADIUS;
+
     for (const other of allSnakes) {
       if (!other.alive) continue;
-      const isSelf  = other === bot;
-      const startI  = isSelf ? 20 : 0;   // skip own neck segments
-      const checkLen = Math.min(other.segs.length, isSelf ? 60 : 50);
-      const radius   = isSelf ? 120 : 200;
-
-      for (let i = startI; i < checkLen; i++) {
+      const isSelf = other === bot;
+      const start  = isSelf ? 24 : 0;
+      const step   = other.segs.length > 120 ? 3 : 2; // coarse sampling for long snakes
+      const maxI   = other.segs.length;
+      for (let i = start; i < maxI; i += step) {
         const s  = other.segs[i];
         const d2 = dist2(head.x, head.y, s.x, s.y);
-        if (d2 < radius * radius && d2 < closestDangerD2) {
-          closestDangerD2 = d2;
-          danger      = true;
-          dangerAngle = Math.atan2(s.y - head.y, s.x - head.x);
+        if (d2 < viewR2 && d2 < nearestThreatD2) {
+          nearestThreatD2 = d2;
+          nearestThreatA  = Math.atan2(s.y - head.y, s.x - head.x);
         }
       }
     }
 
-    // ── Border danger ─────────────────────────────────────────────────────────
-    const M = 300;
-    const borderDanger =
-      head.x < M || head.x > WORLD_W - M ||
-      head.y < M || head.y > WORLD_H - M;
+    // ── 2. Predictive safety: sample candidate headings ──────────────────────
+    // Score each candidate by the distance we could travel before hitting
+    // something. We then blend that with our desired intent (food/hunt).
+    const speed = (bot.boosting ? BOOST_SPEED : BASE_SPEED);
+    const stepLen = speed;
+    const steps   = BOT_FORESEE_STEPS;
+    const probeR  = SEG_RADIUS * 1.9;
 
-    if (danger) {
-      ai.state      = 'evade';
-      ai.spookTimer = 50;
-      const urgency = 1 - Math.sqrt(closestDangerD2) / 200;
-      const turn    = 0.20 + urgency * 0.20;
-      bot.angle     = lerpAngle(bot.angle, dangerAngle + Math.PI + randRange(-0.25, 0.25), turn * delta);
-      bot.boosting  = false;
-      return;
+    const CAND = [
+      -1.10, -0.78, -0.52, -0.32, -0.16, -0.06,
+       0.00,
+       0.06,  0.16,  0.32,  0.52,  0.78,  1.10
+    ];
+
+    // Precompute nearby segments ONCE per AI tick (same origin for every candidate).
+    const nearby = this._gatherNearby(bot, head.x, head.y, stepLen * steps + probeR + 40);
+
+    const safety = new Array(CAND.length);
+    let bestSafety = 0;
+    for (let c = 0; c < CAND.length; c++) {
+      const a = bot.angle + CAND[c];
+      const free = this._foreseeWithBuffer(head.x, head.y, a, stepLen, steps, probeR, nearby);
+      safety[c] = free;
+      if (free > bestSafety) bestSafety = free;
     }
 
-    // Border avoidance
-    if      (head.x < M)           bot.angle = lerpAngle(bot.angle,  0.0,           0.30 * delta);
-    else if (head.x > WORLD_W - M) bot.angle = lerpAngle(bot.angle,  Math.PI,       0.30 * delta);
-    if      (head.y < M)           bot.angle = lerpAngle(bot.angle,  Math.PI * 0.5, 0.30 * delta);
-    else if (head.y > WORLD_H - M) bot.angle = lerpAngle(bot.angle, -Math.PI * 0.5, 0.30 * delta);
+    // ── 3. Intent: where do we WANT to go? ───────────────────────────────────
+    let desiredAngle = bot.angle;
+    let desiredTurn  = p.turn;
+    let wantBoost    = false;
+    let intent       = 'wander';
 
-    if (borderDanger) { bot.boosting = false; return; }
+    // Hunt target search (expensive) — throttled per-bot
+    if (ai.decisionT <= 0) {
+      ai.decisionT = randRange(6, 14);
 
-    // ── Find best food: weighted by size/distance ─────────────────────────────
-    if (!ai.targetFood || !this.food.includes(ai.targetFood) || Math.random() < 0.01) {
-      let best = null, bestScore = -Infinity;
+      // --- Hunt candidate: any snake we can plausibly cut off ---
+      ai.huntTarget = null;
+      if (bot.segs.length >= BOT_MIN_HUNT_LEN && p.aggression > 0.3) {
+        let bestHuntScore = 0;
+        for (const other of allSnakes) {
+          if (!other.alive || other === bot) continue;
+          // Only hunt snakes meaningfully smaller than us (or near our size
+          // for very aggressive bots).
+          const lenRatio = other.segs.length / bot.segs.length;
+          if (lenRatio > 1.05 + (1 - p.aggression) * 0.1) continue;
+          const oh = other.segs[0];
+          const d  = Math.sqrt(dist2(head.x, head.y, oh.x, oh.y));
+          if (d > BOT_HUNT_RADIUS + p.aggression * 200) continue;
+          // Score: prefer close + smaller + players > bots for aggressive bots
+          const playerBias = !other.isBot ? 1.3 : 1.0;
+          const score = (1 / (d + 1)) * (2 - lenRatio) * playerBias * p.aggression;
+          if (score > bestHuntScore) {
+            bestHuntScore  = score;
+            ai.huntTarget  = other;
+          }
+        }
+        if (ai.huntTarget) ai.huntTimer = randRange(60, 120);
+      }
+
+      // --- Food target: weighted by value/distance/safety ---
+      let best = null, bestFoodScore = -Infinity;
+      const greed = p.greed;
       for (const f of this.food) {
         const d2 = dist2(head.x, head.y, f.x, f.y);
-        const score = f.value / (Math.sqrt(d2) + 1);
-        if (score > bestScore) { bestScore = score; best = f; }
+        if (d2 > 1400 * 1400) continue; // ignore very distant food
+        const d = Math.sqrt(d2);
+        // Bigger food far away is worth chasing if greedy
+        const score = (f.value + f.size * 0.15) * (1 / (d + 40)) * (1 + greed * 0.6);
+        if (score > bestFoodScore) { bestFoodScore = score; best = f; }
       }
       ai.targetFood = best;
+    } else if (ai.targetFood && !this.food.includes(ai.targetFood)) {
+      ai.targetFood = null;
     }
 
-    if (ai.targetFood) {
+    // Choose intent: hunt > food > wander
+    if (ai.huntTarget && ai.huntTarget.alive && ai.huntTimer > 0) {
+      const t   = ai.huntTarget;
+      const th  = t.segs[0];
+      // Lead point: aim ahead of target's head along its velocity
+      const lead = 120 + Math.min(300, t.segs.length * 1.2);
+      const lx   = th.x + Math.cos(t.angle) * lead;
+      const ly   = th.y + Math.sin(t.angle) * lead;
+      desiredAngle = Math.atan2(ly - head.y, lx - head.x);
+      desiredTurn  = p.turn * 1.15;
+      intent       = 'hunt';
+      // Boost to close the gap if we're clearly bigger and path is clear
+      const distToHead = Math.sqrt(dist2(head.x, head.y, th.x, th.y));
+      const lenAdv     = bot.segs.length - t.segs.length;
+      if (lenAdv > 30 && distToHead < 260 && bestSafety > steps * 0.7 && bot.segs.length > 60) {
+        wantBoost = Math.random() < p.boostLove * 0.6;
+      }
+    } else if (ai.targetFood) {
       const tx = ai.targetFood.x, ty = ai.targetFood.y;
-      const target = Math.atan2(ty - head.y, tx - head.x);
-      const d2     = dist2(head.x, head.y, tx, ty);
-      bot.angle    = lerpAngle(bot.angle, target, 0.13 * delta);
-      // Boost toward food when close and snake is large enough
-      bot.boosting = d2 < 200 * 200 && bot.segs.length > 40 && !danger;
+      desiredAngle = Math.atan2(ty - head.y, tx - head.x);
+      desiredTurn  = p.turn;
+      intent       = 'seek';
+      // Boost to a cluster of food when big and safe
+      const d2 = dist2(head.x, head.y, tx, ty);
+      if (d2 < 260 * 260 && bot.segs.length > 70 && bestSafety > steps * 0.8 && p.boostLove > 0.5) {
+        wantBoost = Math.random() < p.boostLove * 0.4;
+      }
     } else {
-      ai.wanderAngle += randRange(-0.04, 0.04) * delta;
-      bot.angle    = lerpAngle(bot.angle, ai.wanderAngle, 0.08 * delta);
-      bot.boosting = false;
+      ai.wanderAngle += randRange(-0.05, 0.05) * delta;
+      desiredAngle   = ai.wanderAngle;
+      desiredTurn    = p.turn * 0.7;
+      intent         = 'wander';
     }
+
+    // ── 4. Border pressure ───────────────────────────────────────────────────
+    // Borders are deadly — bias desired angle toward world center when close.
+    const M = 360;
+    let borderPanic = 0;
+    if (head.x < M)             borderPanic = Math.max(borderPanic, 1 - head.x / M);
+    if (head.x > WORLD_W - M)   borderPanic = Math.max(borderPanic, 1 - (WORLD_W - head.x) / M);
+    if (head.y < M)             borderPanic = Math.max(borderPanic, 1 - head.y / M);
+    if (head.y > WORLD_H - M)   borderPanic = Math.max(borderPanic, 1 - (WORLD_H - head.y) / M);
+
+    if (borderPanic > 0.05) {
+      const toCenter = Math.atan2(WORLD_H / 2 - head.y, WORLD_W / 2 - head.x);
+      desiredAngle = lerpAngle(desiredAngle, toCenter, Math.min(1, borderPanic * 1.4));
+      desiredTurn  = Math.max(desiredTurn, 0.12 + borderPanic * 0.15);
+      if (borderPanic > 0.4) wantBoost = false;
+    }
+
+    // ── 5. Pick final heading: blend desired with safest candidate ───────────
+    // Imminent threat = any segment within BOT_DANGER_RADIUS scaled by caution.
+    const dangerR = BOT_DANGER_RADIUS * (0.6 + p.caution * 0.8);
+    const inDanger = nearestThreatD2 < dangerR * dangerR || bestSafety < steps * 0.35;
+
+    let pickIdx = -1;
+    let pickScore = -Infinity;
+    for (let c = 0; c < CAND.length; c++) {
+      const a = bot.angle + CAND[c];
+      const alignment = Math.cos(angleDiff(a, desiredAngle)); // 1 = same, -1 = opposite
+      const safeFrac  = safety[c] / steps;                     // 0..1
+      // Safety dominates when in danger; intent dominates otherwise.
+      const w = inDanger ? (0.12 + (1 - p.caution) * 0.25) : (0.55 + (1 - p.caution) * 0.25);
+      const score = safeFrac * (1 - w) + ((alignment + 1) * 0.5) * w
+                  - Math.abs(CAND[c]) * 0.04; // tiny cost for huge turns
+      if (score > pickScore) { pickScore = score; pickIdx = c; }
+    }
+
+    // Emergency evasion: if NO candidate is safe enough, pick the MOST
+    // safe one ignoring intent. Also don't boost when fleeing.
+    if (bestSafety < steps * 0.3) {
+      let maxS = -1, maxI = 0;
+      for (let c = 0; c < CAND.length; c++) {
+        if (safety[c] > maxS) { maxS = safety[c]; maxI = c; }
+      }
+      pickIdx  = maxI;
+      wantBoost = false;
+      intent   = 'flee';
+      desiredTurn = Math.max(desiredTurn, 0.18);
+    }
+
+    const targetA = bot.angle + CAND[pickIdx];
+    // Reaction latency: if timer not up, slow our turn a bit so we aren't pixel-perfect.
+    const latencyK = ai.reactTimer > 0 ? 0.75 : 1.0;
+    const turnRate = clamp(desiredTurn * latencyK, 0.05, 0.22);
+    bot.angle = lerpAngle(bot.angle, targetA, turnRate * delta);
+    ai.lastTurn = turnRate;
+
+    // ── 6. Boost control ─────────────────────────────────────────────────────
+    // Never boost when fleeing, low-length, or heading toward a wall.
+    if (bot.segs.length < 45) wantBoost = false;
+    if (inDanger)             wantBoost = false;
+    if (borderPanic > 0.3)    wantBoost = false;
+    bot.boosting = wantBoost;
+    if (wantBoost) ai.boostTimer = Math.max(ai.boostTimer, 12);
+    ai.state = intent;
+  }
+
+  // Gather segments within `reach` of (x, y), excluding a small window of
+  // `bot`'s own neck. Returns a { sx, sy, n } object with flat number arrays
+  // for cache locality in the hot loop.
+  _gatherNearby(bot, x, y, reach) {
+    const sx = this._scratchSX || (this._scratchSX = []);
+    const sy = this._scratchSY || (this._scratchSY = []);
+    sx.length = 0;
+    sy.length = 0;
+    const reach2 = reach * reach;
+    const allSnakes = [this.player, ...this.bots];
+    for (let si = 0; si < allSnakes.length; si++) {
+      const other = allSnakes[si];
+      if (!other.alive) continue;
+      const isSelf = other === bot;
+      const start  = isSelf ? 24 : 0;
+      const segs   = other.segs;
+      const stride = segs.length > 100 ? 3 : 2;
+      for (let k = start; k < segs.length; k += stride) {
+        const s = segs[k];
+        const dx = s.x - x, dy = s.y - y;
+        if (dx * dx + dy * dy > reach2) continue;
+        sx.push(s.x);
+        sy.push(s.y);
+      }
+    }
+    return { sx, sy, n: sx.length };
+  }
+
+  _foreseeWithBuffer(x, y, a, len, steps, probeR, nearby) {
+    const cosA = Math.cos(a);
+    const sinA = Math.sin(a);
+    const probeR2 = probeR * probeR;
+    const sx = nearby.sx, sy = nearby.sy, n = nearby.n;
+
+    for (let i = 1; i <= steps; i++) {
+      const px = x + cosA * len * i;
+      const py = y + sinA * len * i;
+      if (px < 20 || px > WORLD_W - 20 || py < 20 || py > WORLD_H - 20) return i - 1;
+      for (let k = 0; k < n; k++) {
+        const dx = sx[k] - px;
+        if (dx > probeR || dx < -probeR) continue;
+        const dy = sy[k] - py;
+        if (dy > probeR || dy < -probeR) continue;
+        if (dx * dx + dy * dy < probeR2) return i - 1;
+      }
+    }
+    return steps;
   }
 
   _moveSnake(snake, speed) {
@@ -455,7 +691,7 @@ class NeonGame {
         );
 
         const bot = this._createSnake(x, y, NEON_COLORS[(i % (NEON_COLORS.length - 1)) + 1], BOT_NAMES[i], true);
-        bot.ai    = { state: 'wander', wanderAngle: Math.random() * Math.PI * 2, targetFood: null, spookTimer: 0 };
+        bot.ai    = this._newAI();
         this.bots[i] = bot;
       }
     }
@@ -522,6 +758,8 @@ class NeonGame {
   }
 
   // ── Input ───────────────────────────────────────────────────────────────────
+  // Mobile touch handling lives in boot() so it can manage the floating
+  // joystick DOM. Here we only hook mouse + keyboard.
   _setupInput() {
     const c = this.canvas;
 
@@ -529,7 +767,6 @@ class NeonGame {
       const r = c.getBoundingClientRect();
       this.mouse.x = e.clientX - r.left;
       this.mouse.y = e.clientY - r.top;
-      // Move cursor
       const cur = document.getElementById('cursor');
       if (cur) { cur.style.left = e.clientX + 'px'; cur.style.top = e.clientY + 'px'; }
     });
@@ -537,21 +774,18 @@ class NeonGame {
     c.addEventListener('mousedown', e => { if (e.button === 0) this.boost = true; });
     window.addEventListener('mouseup',  e => { if (e.button === 0) this.boost = false; });
 
-    c.addEventListener('touchmove', e => {
-      e.preventDefault();
-      const r = c.getBoundingClientRect();
-      this.mouse.x = e.touches[0].clientX - r.left;
-      this.mouse.y = e.touches[0].clientY - r.top;
-      if (e.touches.length > 1) this.boost = true;
-    }, { passive: false });
-
-    c.addEventListener('touchstart', e => {
-      const r = c.getBoundingClientRect();
-      this.mouse.x = e.touches[0].clientX - r.left;
-      this.mouse.y = e.touches[0].clientY - r.top;
+    // Keyboard: space / shift to boost. Useful on PC for trackpad players.
+    window.addEventListener('keydown', e => {
+      if (e.code === 'Space' || e.code === 'ShiftLeft' || e.code === 'ShiftRight') {
+        this.boost = true;
+        e.preventDefault();
+      }
     });
-
-    c.addEventListener('touchend', e => { if (e.touches.length < 2) this.boost = false; });
+    window.addEventListener('keyup', e => {
+      if (e.code === 'Space' || e.code === 'ShiftLeft' || e.code === 'ShiftRight') {
+        this.boost = false;
+      }
+    });
 
     window.addEventListener('resize', () => this.resize());
   }
@@ -941,11 +1175,12 @@ class NeonGame {
       ctx.fill();
     }
 
-    // Snakes
+    // Snakes — scale radius by length so big threats stand out
     for (const snake of [this.player, ...this.bots]) {
       if (!snake.alive || !snake.segs.length) continue;
       const h  = snake.segs[0];
-      const r  = snake.isBot ? 2.2 : 3.5;
+      const lenBoost = Math.min(2.2, snake.segs.length / 120);
+      const r  = (snake.isBot ? 2.0 : 3.5) + lenBoost;
 
       ctx.save();
       ctx.fillStyle  = snake.color;
@@ -1091,8 +1326,13 @@ function _roundRect(ctx, x, y, w, h, r) {
   });
 
   // ── Mobile joystick ────────────────────────────────────────────────────────
+  // Floating / dynamic joystick: the base appears where the player first
+  // touches the left half of the screen. This is far more responsive than
+  // a fixed-position joystick, especially for reaction plays.
+  // The right half is reserved for the boost button (second finger), but
+  // you can also double-tap anywhere to toggle boost briefly.
   if ('ontouchstart' in window || navigator.maxTouchPoints > 0) {
-    cursor.style.display = 'none'; // hide mouse cursor on touch devices
+    cursor.style.display = 'none';
 
     const joystickZone = document.getElementById('joystick-zone');
     const joystickBase = document.getElementById('joystick-base');
@@ -1101,69 +1341,114 @@ function _roundRect(ctx, x, y, w, h, r) {
 
     joystickZone.classList.remove('hidden');
     boostBtn.classList.remove('hidden');
+    joystickZone.style.opacity = '0'; // hidden until first touch
 
-    const BASE_R = 65; // joystick base radius
-    let joyActive = false;
+    const BASE_R  = 80;
+    const DEAD_Z  = 6;
     let joyId     = null;
+    let joyOrigin = { x: 0, y: 0 };
 
-    joystickBase.addEventListener('touchstart', e => {
-      e.preventDefault();
-      const t  = e.changedTouches[0];
-      joyId     = t.identifier;
-      joyActive = true;
-    }, { passive: false });
+    // Touches anywhere on the right half of the screen steer the snake.
+    function isRightHalf(x) { return x > window.innerWidth * 0.45; }
 
-    joystickBase.addEventListener('touchmove', e => {
-      e.preventDefault();
-      if (!joyActive || !game) return;
-
-      let touch = null;
+    window.addEventListener('touchstart', e => {
       for (const t of e.changedTouches) {
-        if (t.identifier === joyId) { touch = t; break; }
-      }
-      if (!touch) return;
-
-      const rect = joystickBase.getBoundingClientRect();
-      const cx   = rect.left + rect.width  / 2;
-      const cy   = rect.top  + rect.height / 2;
-      const dx   = touch.clientX - cx;
-      const dy   = touch.clientY - cy;
-      const dist = Math.sqrt(dx * dx + dy * dy);
-      const clamped = Math.min(dist, BASE_R);
-      const angle   = Math.atan2(dy, dx);
-
-      // Move knob visually
-      joystickKnob.style.transform =
-        `translate(calc(-50% + ${Math.cos(angle) * clamped}px), calc(-50% + ${Math.sin(angle) * clamped}px))`;
-
-      // Steer snake by setting mouse position toward the angle
-      if (dist > 8 && game.running) {
-        const W = canvas.width  / 2;
-        const H = canvas.height / 2;
-        game.mouse.x = W + Math.cos(angle) * 200;
-        game.mouse.y = H + Math.sin(angle) * 200;
-      }
-    }, { passive: false });
-
-    joystickBase.addEventListener('touchend', e => {
-      for (const t of e.changedTouches) {
-        if (t.identifier === joyId) {
-          joyActive = false;
+        // Steering touch — first finger on right half
+        if (joyId === null && isRightHalf(t.clientX) &&
+            !boostBtn.contains(t.target)) {
+          joyId = t.identifier;
+          joyOrigin.x = t.clientX;
+          joyOrigin.y = t.clientY;
+          joystickZone.style.left = (t.clientX - BASE_R) + 'px';
+          joystickZone.style.top  = (t.clientY - BASE_R) + 'px';
+          joystickZone.style.opacity = '1';
           joystickKnob.style.transform = 'translate(-50%, -50%)';
-          break;
+          e.preventDefault();
         }
       }
-    });
+    }, { passive: false });
 
+    window.addEventListener('touchmove', e => {
+      if (!game || !game.running) return;
+      for (const t of e.changedTouches) {
+        if (t.identifier !== joyId) continue;
+        const dx = t.clientX - joyOrigin.x;
+        const dy = t.clientY - joyOrigin.y;
+        const d  = Math.sqrt(dx * dx + dy * dy);
+        // Re-center origin if finger drags far from it (floating behavior):
+        // keeps joystick feel consistent during long swipes.
+        if (d > BASE_R * 1.5) {
+          const ang = Math.atan2(dy, dx);
+          joyOrigin.x = t.clientX - Math.cos(ang) * BASE_R;
+          joyOrigin.y = t.clientY - Math.sin(ang) * BASE_R;
+          joystickZone.style.left = (joyOrigin.x - BASE_R) + 'px';
+          joystickZone.style.top  = (joyOrigin.y - BASE_R) + 'px';
+        }
+        const dx2 = t.clientX - joyOrigin.x;
+        const dy2 = t.clientY - joyOrigin.y;
+        const d2  = Math.sqrt(dx2 * dx2 + dy2 * dy2);
+        const clamped = Math.min(d2, BASE_R);
+        const angle   = Math.atan2(dy2, dx2);
+        joystickKnob.style.transform =
+          `translate(calc(-50% + ${Math.cos(angle) * clamped}px), calc(-50% + ${Math.sin(angle) * clamped}px))`;
+        if (d2 > DEAD_Z) {
+          const W = canvas.width  / 2;
+          const H = canvas.height / 2;
+          // Use a long vector so lerp on game side turns quickly and smoothly.
+          game.mouse.x = W + Math.cos(angle) * 400;
+          game.mouse.y = H + Math.sin(angle) * 400;
+        }
+        e.preventDefault();
+      }
+    }, { passive: false });
+
+    function endJoy(e) {
+      for (const t of e.changedTouches) {
+        if (t.identifier === joyId) {
+          joyId = null;
+          joystickZone.style.opacity = '0';
+          joystickKnob.style.transform = 'translate(-50%, -50%)';
+        }
+      }
+    }
+    window.addEventListener('touchend',    endJoy);
+    window.addEventListener('touchcancel', endJoy);
+
+    // Boost button — any finger on it activates boost.
+    let boostPointers = new Set();
     boostBtn.addEventListener('touchstart', e => {
       e.preventDefault();
+      for (const t of e.changedTouches) boostPointers.add(t.identifier);
       if (game) game.boost = true;
       boostBtn.classList.add('active');
     }, { passive: false });
+    function endBoost(e) {
+      for (const t of e.changedTouches) boostPointers.delete(t.identifier);
+      if (boostPointers.size === 0) {
+        if (game) game.boost = false;
+        boostBtn.classList.remove('active');
+      }
+    }
+    boostBtn.addEventListener('touchend',    endBoost);
+    boostBtn.addEventListener('touchcancel', endBoost);
 
-    boostBtn.addEventListener('touchend', () => {
-      if (game) game.boost = false;
-      boostBtn.classList.remove('active');
+    // Double-tap to toggle boost briefly (useful when a hand is busy steering).
+    let lastTap = 0;
+    window.addEventListener('touchstart', e => {
+      const now = performance.now();
+      // Only count taps that don't land on the boost button or active joystick.
+      if (e.target === boostBtn || boostBtn.contains(e.target)) return;
+      if (now - lastTap < 260 && game && game.running) {
+        game.boost = true;
+        boostBtn.classList.add('active');
+        setTimeout(() => {
+          if (boostPointers.size === 0) {
+            if (game) game.boost = false;
+            boostBtn.classList.remove('active');
+          }
+        }, 500);
+      }
+      lastTap = now;
     });
   }
 })();
