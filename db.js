@@ -4,8 +4,9 @@ let pool = null;
 let useMemory = false;
 
 // In-memory fallback storage
-const memPlayers = new Map();
-const memSessions  = [];
+const memPlayersByName = new Map();
+const memPlayersById   = new Map();
+const memSessions      = [];
 let nextPlayerId  = 1;
 let nextSessionId = 1;
 
@@ -42,12 +43,8 @@ async function init() {
     )
   `);
 
-  await pool.query(`
-    CREATE INDEX IF NOT EXISTS idx_sessions_player ON game_sessions(player_id);
-  `);
-  await pool.query(`
-    CREATE INDEX IF NOT EXISTS idx_sessions_score  ON game_sessions(score DESC);
-  `);
+  await pool.query('CREATE INDEX IF NOT EXISTS idx_sessions_player ON game_sessions(player_id)');
+  await pool.query('CREATE INDEX IF NOT EXISTS idx_sessions_score  ON game_sessions(score DESC)');
 
   console.log('[DB] PostgreSQL connected and tables ready.');
 }
@@ -55,13 +52,15 @@ async function init() {
 async function getOrCreatePlayer(nickname) {
   if (useMemory) {
     const key = nickname.toLowerCase();
-    if (!memPlayers.has(key)) {
-      const p = { id: nextPlayerId++, nickname, created_at: new Date(), last_seen: new Date() };
-      memPlayers.set(key, p);
+    let p = memPlayersByName.get(key);
+    if (!p) {
+      p = { id: nextPlayerId++, nickname, created_at: new Date(), last_seen: new Date() };
+      memPlayersByName.set(key, p);
+      memPlayersById.set(p.id, p);
     } else {
-      memPlayers.get(key).last_seen = new Date();
+      p.last_seen = new Date();
     }
-    return memPlayers.get(key);
+    return p;
   }
 
   const { rows } = await pool.query(`
@@ -77,7 +76,7 @@ async function getPlayerHistory(playerId) {
   if (useMemory) {
     return memSessions
       .filter(s => s.player_id === playerId)
-      .sort((a, b) => new Date(b.played_at) - new Date(a.played_at))
+      .sort((a, b) => b.played_at - a.played_at)
       .slice(0, 20);
   }
 
@@ -94,11 +93,17 @@ async function getPlayerStats(playerId) {
   if (useMemory) {
     const sessions = memSessions.filter(s => s.player_id === playerId);
     if (!sessions.length) return { total_games: 0, best_score: 0, total_kills: 0, avg_score: 0 };
+    let best = 0, totalKills = 0, totalScore = 0;
+    for (const s of sessions) {
+      if (s.score > best) best = s.score;
+      totalKills += s.kills;
+      totalScore += s.score;
+    }
     return {
       total_games: sessions.length,
-      best_score:  Math.max(...sessions.map(s => s.score)),
-      total_kills: sessions.reduce((sum, s) => sum + s.kills, 0),
-      avg_score:   Math.round(sessions.reduce((sum, s) => sum + s.score, 0) / sessions.length)
+      best_score:  best,
+      total_kills: totalKills,
+      avg_score:   Math.round(totalScore / sessions.length),
     };
   }
 
@@ -131,15 +136,19 @@ async function saveScore({ playerId, score, length, kills, duration }) {
 
 async function getLeaderboard() {
   if (useMemory) {
-    const best = new Map();
+    const bestByPlayer = new Map();
     for (const s of memSessions) {
-      const p = [...memPlayers.values()].find(x => x.id === s.player_id);
-      if (!p) continue;
-      if (!best.has(p.id) || best.get(p.id).score < s.score) {
-        best.set(p.id, { nickname: p.nickname, score: s.score, kills: s.kills, played_at: s.played_at });
-      }
+      const best = bestByPlayer.get(s.player_id);
+      if (!best || best.score < s.score) bestByPlayer.set(s.player_id, s);
     }
-    return [...best.values()].sort((a, b) => b.score - a.score).slice(0, 10);
+    return [...bestByPlayer.values()]
+      .map(s => {
+        const p = memPlayersById.get(s.player_id);
+        return p ? { nickname: p.nickname, score: s.score, kills: s.kills, played_at: s.played_at } : null;
+      })
+      .filter(Boolean)
+      .sort((a, b) => b.score - a.score)
+      .slice(0, 10);
   }
 
   const { rows } = await pool.query(`
@@ -160,9 +169,8 @@ async function getAllScores() {
   if (useMemory) {
     return memSessions
       .map(s => {
-        const p = [...memPlayers.values()].find(x => x.id === s.player_id);
-        if (!p) return null;
-        return { nickname: p.nickname, score: s.score, length: s.length, kills: s.kills, duration: s.duration, played_at: s.played_at };
+        const p = memPlayersById.get(s.player_id);
+        return p ? { nickname: p.nickname, score: s.score, length: s.length, kills: s.kills, duration: s.duration, played_at: s.played_at } : null;
       })
       .filter(Boolean)
       .sort((a, b) => b.score - a.score);
